@@ -1,0 +1,6 @@
+{
+    "type": "module",
+    "dependencies": {
+        "ffmpeg-stream": "^0.7.0"
+    }
+}
