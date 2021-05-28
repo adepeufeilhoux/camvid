@@ -1,23 +1,17 @@
 import { spawn } from 'child_process';
 import http from 'http';
-import { readFile } from 'fs';
+import { createReadStream, unlink, watch, access, constants } from 'fs';
 
-//var child = spawn('/opt/vc/bin/raspivid', ['-hf', '-w', '1280', '-h', '1024', '-t', '99999999', '-fps', '20', '-b', '500000', '-o', '-']);
-//	child.stdout.pipe(response);
-
-const helpHTML = "<h1>Usage</h1>" +
-	"<ul>" +
-		"<li><b>/start</b>: start the camera</li>" +
-		"<li><b>/stop</b>: stop the camera</li>" +
-		"<li><b>/stream</b>: image stream (when camera is started)</li>" +
-	"</ul>";
-
-/*
-const videoHTML = "<h1>Video</h1>" +
-	"<video autoplay='true' controls='true'>" +
-		"<source src='http://rasp2:8080/stream' type='video/mp4'>"
-	"</video>";
-*/
+const helpHTML = 
+	"<html><head><title>CAMVID</title></head>" +
+		"<body>" +
+		"<h1>Usage</h1>" +
+		"<ul>" +
+			"<li><b>/start</b>: start the camera</li>" +
+			"<li><b>/stop</b>: stop the camera</li>" +
+			"<li><b>/stream</b>: image stream (when camera is started)</li>" +
+		"</ul>" + 
+		"</body>";
 
 const raspividCommand = '/opt/vc/bin/raspivid';
 const raspividCommandArgs = [
@@ -27,24 +21,31 @@ const raspividCommandArgs = [
 	'-h', '720', // Set image height <size>
 	'-ih', // Insert inline headers (SPS, PPS) to stream
 	'-fps', '30', // Specify the frames per second to record
+	'--nopreview',
 	'-o', '-']; // output
 
-var ffmpegCommand = "/usr/bin/ffmpeg";
-var ffmpegCommandArgs = [
+const m3u8Filename = 'camvid.m3u8';
+
+const ffmpegCommand = "/usr/bin/ffmpeg";
+const ffmpegCommandArgs = [
 	'-i', '-', // read the input from stdin
 //	'-f', 'h264', // input format
 	'-c', 'copy', // transformation
-	'-f', 'mpegts', // output format
-	'-movflags', 'frag_keyframe+empty_moov', // ?
-	'-'
+	'-f', 'hls', // output format
+	'-hls_time', '4', // slices the video and audio into segments with a duration of 4 seconds
+	'-hls_flags', 'delete_segments', // slices the video and audio into segments with a duration of 4 seconds
+//	'-movflags', 'frag_keyframe+empty_moov', // ?
+	m3u8Filename
+//	'-'
 //	'rtsp://192.168.10.191:5000'
 ];
+
 
 var raspivid = null;
 var converter = null;
 var videoHTML = null;
 
-function startStreaming() {
+function startStreaming(raw = false) {
 	console.log("STREAMING");
 
 	raspivid = spawn(raspividCommand, raspividCommandArgs);
@@ -57,31 +58,48 @@ function startStreaming() {
 		console.log("raspivid exited with code " + code);
 	});
 
-	converter = spawn(ffmpegCommand, ffmpegCommandArgs);
-	raspivid.stdout.pipe(converter.stdin);
+	if (!raw) {
+		console.log("starting converter");
+		
+		converter = spawn(ffmpegCommand, ffmpegCommandArgs);
+		raspivid.stdout.pipe(converter.stdin);
 
-	converter.stderr.on('data', (data) => {
-		console.log("raspivid stderr: " + data);
-	});
+		converter.stderr.on('data', (data) => {
+			console.log("converter stderr: " + data);
+		});
 
-	converter.on('exit', (code) => {
-		console.log("raspivid exited with code " + code);
-	});
+		converter.on('exit', (code) => {
+			console.log("converter exited with code " + code);
+		});
+	}
+	return m3u8Filename;
 }
 
+function pipeFileInResponse(fileName, response) {
+	var readStream = createReadStream(fileName);
+	readStream.on('open', () => { 
+			response.writeHead(200, "OK");
+			readStream.pipe(response);
+		});
+	readStream.on('error', (err) => {
+			console.log("couldn't read in " + fileName + ": " + err);
+			response.writeHead(500, "Server error");
+			response.end();
+		});
+}
 
 var server = http.createServer(function(request, response) {
 	switch (request.url) {
 		case '/start':
 			console.log("START");
-			startStreaming();
+			var mpegSequenceFile = startStreaming();
 			response.writeHead(200, "OK");
-			response.end("Stream started");
+			response.end(mpegSequenceFile);
 			break;
 		case '/stop':
 			console.log("STOP");
-			raspivid.kill();
-			converter.kill();
+			if (raspivid) raspivid.kill();
+			if (converter) converter.kill();
 			raspivid = null; converter = null;
 			response.writeHead(200, "OK");
 			response.end("Stream stopped");
@@ -92,28 +110,54 @@ var server = http.createServer(function(request, response) {
 			console.log("STREAM");
 			converter.stdout.pipe(response);
 			break;
-		case '/camvid':
-			console.log("CAMVID");
-			response.setHeader('Content-Type', 'text/html');
-			response.writeHead(200, "OK");
-			response.end(videoHTML);
+		case '/raw':
+			console.log("RAW");
+			if (raspivid == null) { startStreaming(true); }
+//			response.setHeader('Content-Type', 'video/h264');
+			raspivid.stdout.pipe(response);
+			break;
+		case '/camvid.m3u8':
+			console.log("CAMVID M3U8");
+			if (raspivid != null) {
+				access(m3u8Filename, constants.R_OK, (err) => {
+					response.setHeader('Content-Type', 'application/x-mpegURL');
+					if (err) {
+						const ac = new AbortController();
+						// wait till m3u8 file exists
+						watch(".", { signal: ac.signal }, (eventType, fileName) => {
+							console.log(eventType + " event on " + fileName);
+							if (fileName === m3u8Filename) {
+								pipeFileInResponse('camvid.m3u8', response);
+								ac.abort();
+							}
+						});
+					} else {
+						pipeFileInResponse('camvid.m3u8', response);
+					}
+				});
+			} else {
+				response.writeHead(500, "Streaming not started");
+				response.end();
+			}
 			break;
 		default:
-			console.log("DEFAULT");
-			response.writeHead(400, "Bad request");
-			response.end(helpHTML);
-			return;
+			if (request.url.startsWith("/camvid")) {
+				console.log("CAMVID FILE: " + request.url.substring(1));
+				pipeFileInResponse(request.url.substring(1), response);
+			} else {
+				console.log("DEFAULT");
+				response.writeHead(400, "Bad request");
+				response.end(helpHTML);
+				return;
+			}
 	}
 });
 
-readFile("camvid.html", (err, data) => {
-	if (err != null) {
-        console.error(`Could not read camvid.html file: ${err}`);
-        process.exit(1);
-	} else {
-		videoHTML = data;
-		server.listen(8080, () => {
-			console.log("server listening on port 8080");
-		});
-	}});
+// delete m3u8 file if present
+unlink(m3u8Filename, (err) => {
+	if (err) console.log( m3u8Filename + ' not deleted because: ' + err );
+});
 
+// start the server
+server.listen(8080, () => {
+	console.log("server listening on port 8080"); });

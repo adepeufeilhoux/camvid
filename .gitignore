@@ -1,3 +1,5 @@
 node_modules/**
 *.h264
 *.jpg
+camvid*.ts
+camvid.m3u8

@@ -14,7 +14,6 @@
       width="640"
       height="264"
     >
-      <source src="http://rasp2:8080/stream" type="video/mp4" />
       <p class="vjs-no-js">
         To view this video please enable JavaScript, and consider upgrading to a
         web browser that
@@ -25,16 +24,47 @@
     </video>
   
     <script src="https://vjs.zencdn.net/7.11.4/video.min.js"></script>
+    <!-- https://github.com/videojs/http-streaming#getting-started -->
     <script>
-      var player = videojs('camvid', 
-          {autoplay: "true", controls: "true"},
-          function onPlayerReady() {
-            videojs.log('Your player is ready!');
-            this.play();
-            this.on('ended', function() {
-              videojs.log('Awww...over so soon?!');
-            });
-      });
+
+      function startStreaming(callbackfunction) {
+	     const startStreamingURL = "http://rasp2:8080/start";
+
+	      /*
+	     var xmlhttp = new XMLHttpRequest();
+	      xmlhttp.onreadystatechange = callbackfunction(xmlhttp);
+	      xmlhttp.open('GET', startStreamingURL, false);
+	      xmlhttp.send('');
+		*/
+	      fetch(startStreamingURL)
+		      .then( (response) => { callbackfunction(response); });
+      }
+
+      var player = videojs(	'camvid', 
+				{autoplay: "true", controls: "true"},
+				() => {
+					player = this.player;
+					videojs.log('Your player is ready!');
+					player.on('pause', () => {
+						videojs.log('Pause');
+					});
+					player.on('ended', () => {
+						videojs.log('Awww...over so soon?!');
+		    			});
+				});
+	startStreaming((response) => {
+		videojs.log('startStreaming response=' + response.status);
+		if (response.ok) {
+			response.text().then( (seqFile) => {
+				videojs.log('startStreaming seqFile=' + seqFile);
+				player.src({
+					src: 'http://rasp2:8080/' + seqFile,
+					type: 'application/x-mpegURL'
+				});
+				player.play();
+			}
+		)}
+	});
     </script>
   </body>
 </html>
